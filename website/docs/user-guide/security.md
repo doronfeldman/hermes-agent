@@ -33,7 +33,7 @@ The approval system supports three modes, configured via `approvals.mode` in `~/
 approvals:
   mode: smart                     # smart | manual | off
   timeout: 300                    # seconds to wait for user response (default: 300)
-  cron_mode: deny                 # deny | approve — what cron jobs do when they hit a dangerous command
+  cron_mode: deny                 # deny | approve | smart — cron dangerous-command handling
   single_query_mode: deny         # deny | approve — what single-query (-q) sessions do on a dangerous command
   unattended_mode: deny           # deny | approve — what webhook/API sessions do on a dangerous command
   mcp_reload_confirm: true        # /reload-mcp asks before invalidating the MCP tool cache
@@ -46,7 +46,7 @@ The full set of keys:
 |---|---|---|
 | `mode` | `smart` | Approval policy for dangerous shell commands — see the table below. |
 | `timeout` | `300` | Seconds Hermes waits for an approval reply on messaging platforms, ACP and approval transport plugins before timing out. The CLI, TUI and Desktop wait until you answer. |
-| `cron_mode` | `deny` | How [cron jobs](./features/cron.md) behave headlessly when they trigger a dangerous-command prompt. `deny` blocks the command (the agent must find another path); `approve` auto-approves everything in cron context. |
+| `cron_mode` | `deny` | How [cron jobs](./features/cron.md) handle flagged commands. `deny` blocks; `approve` automatically permits, subject to existing safety floors; `smart` uses the configured auxiliary approval provider and operator policy for each operation. |
 | `single_query_mode` | `deny` | How one-shot [`hermes chat -q`](./cli.md) sessions behave when they trigger a dangerous-command prompt. A `-q` session runs a single turn and exits with no user waiting to answer prompts; `deny` blocks the command (the agent must find another path), `approve` auto-approves everything in single-query context. Mirrors `cron_mode`. |
 | `unattended_mode` | `deny` | How sessions on unattended programmatic platforms (webhook, msgraph_webhook, api_server) behave when they trigger a dangerous-command prompt. These surfaces have no human who can answer `/approve`, so instead of blocking for the full approval timeout, `deny` blocks the command instantly (the agent must find another path) and `approve` auto-approves everything in unattended context. Mirrors `cron_mode`. |
 | `mcp_reload_confirm` | `true` | When true, `/reload-mcp` asks before rebuilding the MCP tool set. Rebuilding invalidates the provider prompt cache (tool schemas live in the system prompt), so the next message re-sends full input tokens. Users who click **Always Approve** flip this key to `false`. |
@@ -61,6 +61,37 @@ The full set of keys:
 :::warning
 Setting `approvals.mode: off` disables all safety prompts. Use only in trusted environments (CI/CD, containers, etc.).
 :::
+
+### Smart approval for cron jobs
+
+Opt in by setting `approvals.cron_mode: smart` in the **job's profile** configuration.
+Other profiles retain their own setting, and the default remains `deny`. Keep approvals
+enabled (`mode: smart` or `manual`) and YOLO disabled. Existing isolated-backend exemptions
+and `off`/YOLO behavior are unchanged. `single_query_mode` and `unattended_mode` remain
+binary settings; single-query context still takes precedence if both markers are present.
+
+Cron uses the same `auxiliary.approval` provider/model and `approvals.smart_policy` as
+interactive Smart approval, including registered provider plugins. No second provider
+configuration is needed.
+
+| Provider result | Cron behavior |
+|---|---|
+| `APPROVE` | Permit the assessed operation once. No session or permanent grant is created. |
+| `DENY` | Block the operation. There is no unattended owner override. |
+| `ESCALATE` | Block promptly with an actionable `approval_required` result. The agent should report the deferred operation for an interactive conversation; no approval request is queued. |
+| Error, invalid response, or timeout | Block with `approval_error`. The whole provider call is bounded by the positive, finite `auxiliary.approval.timeout`, including queueing and retries. A late response cannot approve execution. |
+
+Hard safety floors and explicit user-deny rules run before Smart assessment. Flagged
+commands are reassessed even if their command or pattern was previously allowlisted;
+unflagged commands retain normal handling. The provider receives the complete command
+or Python source. `execute_code` uses a fresh process for each approved cron Smart call,
+so a verdict cannot authorize hidden state left by a previous Python cell. Generic tool
+requests that require a person remain blocked: a tool name and reason alone are not
+sufficient to assess the operation's arguments.
+
+This does not change scheduler status semantics: a completed agent run may still be
+reported as `ok` even when its task was blocked. Confirm task-specific output and persisted
+state when validating a cron workflow.
 
 ### YOLO Mode
 

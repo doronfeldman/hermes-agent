@@ -760,7 +760,7 @@ _ACTION_GATE = _GateSpec(
 
 def _smart_gate(spec: _GateSpec, command: str, description: str, pattern_key: str,
                 pattern_keys: list[str], session_key: str, *,
-                human_present: bool) -> tuple[dict | None, bool]:
+                human_present: bool, unattended: bool = False) -> tuple[dict | None, bool]:
     """Guardian-LLM step -> ``(result, smart_denied_for_owner)``: a result ends the gate;
     ``smart_denied_for_owner`` means an interactive owner may still override the DENY for this
     one operation (once/deny only, nothing persists).
@@ -770,11 +770,20 @@ def _smart_gate(spec: _GateSpec, command: str, description: str, pattern_key: st
     counts toward the denial breaker even when an owner may override it. ESCALATE follows the
     normal, potentially persistent manual behavior.
     """
-    verdict = _smart_verdict(command, description, pattern_key, pattern_keys, session_key)
+    verdict = (_smart_verdict(command, description, pattern_key, pattern_keys, session_key, report_failure=True)
+               if unattended else _smart_verdict(command, description, pattern_key, pattern_keys, session_key))
     if verdict == "approve":
         _reset_denials(session_key)
         logger.debug(spec.smart_log.format(command=command[:60], description=description, session_key=session_key))
         return {"approved": True, "message": None, "smart_approved": True, "description": description}, False
+    if unattended and verdict not in {"deny", "escalate"}:
+        return {
+            "approved": False, "status": "approval_error", "approval_failure": verdict,
+            "description": description, "pattern_key": pattern_key,
+            "message": (f"BLOCKED: cron Smart approval provider failed ({verdict}). "
+                        "The operation was not approved. Report the failed task and check the "
+                        "approval provider configuration/logs before retrying. Do not bypass this guard."),
+        }, False
     if verdict != "deny":
         return None, False
     _record_denial(session_key)
@@ -788,6 +797,25 @@ def _smart_gate(spec: _GateSpec, command: str, description: str, pattern_key: st
                     f"dangerous. Do NOT retry.{_denial_breaker_addendum(session_key)}"),
         "smart_denied": True,
     }, True
+
+
+def _cron_smart_decision(spec: _GateSpec, command: str, description: str,
+                         pattern_key: str, pattern_keys: list[str]) -> dict:
+    """One assessed operation, with no human wait and no reusable approval grant."""
+    result, _ = _smart_gate(spec, command, description, pattern_key, pattern_keys,
+                            get_current_session_key(), human_present=False, unattended=True)
+    return result if result is not None else _cron_needs_human(pattern_key, description)
+
+
+def _cron_needs_human(pattern_key: str, description: str) -> dict:
+    return {
+        "approved": False, "status": "approval_required", "approval_pending": False,
+        "pattern_key": pattern_key, "description": description,
+        "message": (f"BLOCKED: cron Smart approval requires user input ({description}). "
+                    "No interactive approval surface is available in this cron run. "
+                    "Report the deferred operation so the user can request it in an interactive "
+                    "conversation. No approval request was queued. Do not retry through another tool."),
+    }
 
 
 def _human_decision(spec: _GateSpec, *, command: str, description: str,
@@ -972,6 +1000,10 @@ def _run_approval_gate(
     # dangerous-pattern prompts) must too, or "off" still prompts on those surfaces.
     if _yolo_active() or approval_context._get_approval_mode() == "off":
         return _approved()
+    if approval_context._is_cron_smart_context():
+        # These callers require a person (plugin rules, protected writes, computer use).
+        # A display target/reason is not a complete executable payload for the guardian.
+        return _cron_needs_human(pattern_key, description)
     session_key = get_current_session_key()
     if is_approved(session_key, pattern_key):
         return _approved()
@@ -1088,6 +1120,8 @@ def check_dangerous_command(command: str, env_type: str,
         return blocked
     if _yolo_active():
         return _approved()
+    if approval_context._is_cron_smart_context() and approval_context._get_approval_mode() != "off":
+        return _cron_smart_command(command)
     if _command_matches_permanent_allowlist(command):
         return _approved()
     is_dangerous, pattern_key, description = detect_dangerous_command(command)
@@ -1165,6 +1199,31 @@ def _tirith_scan(command: str) -> dict:
         }]}
 
 
+def _command_warnings(command: str, *, respect_approvals: bool = True) -> list[tuple]:
+    """Gather the same scanner and pattern findings for interactive and cron Smart review."""
+    tirith_result = _tirith_scan(command)
+    is_dangerous, pattern_key, description = detect_dangerous_command(command)
+    warnings = []
+    session_key = get_current_session_key()
+    if tirith_result["action"] in {"block", "warn"}:
+        findings = tirith_result.get("findings") or []
+        rule_id = findings[0].get("rule_id", "unknown") if findings else "unknown"
+        tirith_key = f"tirith:{rule_id}"
+        if not respect_approvals or not is_approved(session_key, tirith_key):
+            warnings.append((tirith_key, _format_tirith_description(tirith_result), True))
+    if is_dangerous and (not respect_approvals or not is_approved(session_key, pattern_key)):
+        warnings.append((pattern_key, description, False))
+    return warnings
+
+
+def _cron_smart_command(command: str) -> dict:
+    warnings = _command_warnings(command, respect_approvals=False)
+    if not warnings:
+        return _approved()
+    return _cron_smart_decision(_COMMAND_GATE, command, "; ".join(desc for _, desc, _ in warnings),
+                                warnings[0][0], [key for key, _, _ in warnings])
+
+
 def check_all_command_guards(command: str, env_type: str,
                              approval_callback=None,
                              has_host_access: bool = False) -> dict:
@@ -1187,6 +1246,8 @@ def check_all_command_guards(command: str, env_type: str,
     approval_mode = approval_context._get_approval_mode()
     if _yolo_active() or approval_mode == "off":
         return _approved()
+    if approval_context._is_cron_smart_context():
+        return _cron_smart_command(command)
     if _command_matches_permanent_allowlist(command):
         return _approved()
 
@@ -1202,18 +1263,8 @@ def check_all_command_guards(command: str, env_type: str,
 
     # Gather findings: warnings = [(pattern_key, description, is_tirith)]. Tirith block AND warn both go through the
     # approval flow (block used to be a hard stop) so users can inspect the findings and approve.
-    tirith_result = _tirith_scan(command)
-    is_dangerous, pattern_key, description = detect_dangerous_command(command)
-    warnings = []
+    warnings = _command_warnings(command)
     session_key = get_current_session_key()
-    if tirith_result["action"] in {"block", "warn"}:
-        findings = tirith_result.get("findings") or []
-        rule_id = findings[0].get("rule_id", "unknown") if findings else "unknown"
-        tirith_key = f"tirith:{rule_id}"
-        if not is_approved(session_key, tirith_key):
-            warnings.append((tirith_key, _format_tirith_description(tirith_result), True))
-    if is_dangerous and not is_approved(session_key, pattern_key):
-        warnings.append((pattern_key, description, False))
     if not warnings:
         return _approved()
 
@@ -1271,6 +1322,15 @@ def check_execute_code_guard(code: str, env_type: str, has_host_access: bool = F
     # No user is present to approve arbitrary code in -q / cron / unattended
     # sessions: the first active context resolves instantly from its mode.
     for ctx in _unattended_contexts():
+        if ctx.mode() == "smart":
+            blocked = _floor_block(code)
+            if blocked is not None:
+                return blocked
+            result = _cron_smart_decision(_EXECUTE_CODE_GATE, f"execute_code <<'PY'\n{code}\nPY",
+                                          description, pattern_key, [pattern_key])
+            if result["approved"]:
+                result["fresh_process"] = True
+            return result
         if ctx.mode() == "deny":
             return _denied(
                 "BLOCKED: execute_code runs arbitrary local Python (including "

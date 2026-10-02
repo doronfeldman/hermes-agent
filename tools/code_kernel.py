@@ -305,8 +305,9 @@ class _BoundedBuffer:
 class SessionKernel:
     """One live kernel process plus its RPC server and reader threads."""
 
-    def __init__(self, key: Tuple):
+    def __init__(self, key: Tuple, *, fresh_process: bool = False):
         self.key, self.owner, self.lock = key, key[0], threading.Lock()
+        self.fresh_process = fresh_process
         self.proc: Optional[subprocess.Popen] = None
         self.tmpdir = self.rpc_token = self.sentinel = ""
         self.sock_path: Optional[str] = None
@@ -624,6 +625,13 @@ def _spawn(kernel: SessionKernel, *, child_python: str, child_cwd: str,
     child_env["HERMES_KERNEL_SENTINEL"] = kernel.sentinel
     # Full clipped stdout spills to the kernel's tmpdir so the agent can read_file the middle.
     child_env["HERMES_KERNEL_SPILL_DIR"] = kernel.tmpdir
+    if kernel.fresh_process:
+        # One-shot staging is deleted before returning. Output must outlive it, using
+        # the same profile cache as host-side stdout spills, in a private unique directory.
+        from hermes_constants import get_hermes_dir
+        cache_dir = get_hermes_dir("cache/exec", "exec_spill")
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        child_env["HERMES_KERNEL_SPILL_DIR"] = tempfile.mkdtemp(prefix="cell-", dir=cache_dir)
     # Generated client reconnects after the RPC server's 300s idle timeout between cells.
     child_env["HERMES_RPC_PERSISTENT"] = "1"
     # Parent-death watchdog plumbing: Windows inherits a SYNCHRONIZE handle to this process; POSIX
@@ -799,7 +807,7 @@ def _cell_result(kernel: SessionKernel, key: Tuple, status: str, payload: Dict[s
     result: Dict[str, Any] = {
         "status": status, "output": stdout_text, "exit_code": 0,
         "tool_calls_made": kernel.tool_call_counter[0], "duration_seconds": duration,
-        "kernel": {"mode": "session", "reused": reused,
+        "kernel": {"mode": "one-shot" if kernel.fresh_process else "session", "reused": reused,
                    "execution_count": kernel.execution_count, "state_reset": state_reset},
     }
     result.update(stdout_metadata)
@@ -814,7 +822,8 @@ def _cell_result(kernel: SessionKernel, key: Tuple, status: str, payload: Dict[s
         result["warning"] = (
             f"Cell stdout exceeded the inline cap; head shown. FULL output saved to {cell_spill} "
             f'— page it with read_file(path="{cell_spill}", offset=...) instead of re-running. '
-            "(Kernel state persists: printing a narrower slice next call is often cheaper.)"
+            + ("" if kernel.fresh_process else
+               "(Kernel state persists: printing a narrower slice next call is often cheaper.)")
         )
     if status == "timeout":
         message = (f"Cell timed out after {timeout}s; the session kernel was killed and its "
@@ -850,11 +859,23 @@ def _cell_result(kernel: SessionKernel, key: Tuple, status: str, payload: Dict[s
 def execute_in_session_kernel(
     code: str, *, task_id: str, mode: str, child_python: str, child_cwd: str,
     sandbox_tools: frozenset, timeout: int, max_tool_calls: int, reset: bool, is_interrupted,
+    fresh_process: bool = False,
 ) -> str:
     """Run one cell in the (owner, mode, python, cwd, tools) session kernel. The owner is the
     session key (``_resolve_owner``), not the per-turn task id, so state survives across turns."""
     key = (_resolve_owner(task_id) or "", mode, child_python, child_cwd, tuple(sorted(sandbox_tools)))
     exec_start = time.monotonic()
+    if fresh_process:
+        # A one-shot guardian verdict covers only this source, not hidden state from
+        # previous cells. Keep this kernel private so concurrent cells cannot join it.
+        kernel = SessionKernel(key, fresh_process=True)
+        try:
+            return _run_cell(kernel, key, code, task_id=task_id, child_python=child_python,
+                             child_cwd=child_cwd, sandbox_tools=sandbox_tools, timeout=timeout,
+                             max_tool_calls=max_tool_calls, is_interrupted=is_interrupted,
+                             exec_start=exec_start, state_reset=True)
+        finally:
+            kernel.teardown()
     from agent.delegation_context import is_delegated_child_context
     kernel, state_reset = _acquire_kernel(key, reset, pinned=is_delegated_child_context())
     try:

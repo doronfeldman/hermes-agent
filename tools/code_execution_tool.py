@@ -657,7 +657,7 @@ def _run_remote_per_call(env, env_type: str, code: str, effective_task_id: str,
 
 
 def _execute_remote(code: str, task_id: Optional[str], enabled_tools: Optional[List[str]],
-                    reset: bool = False) -> str:
+                    reset: bool = False, fresh_process: bool = False) -> str:
     """Run code on the remote terminal backend: the owner's persistent remote session kernel
     (tools/code_kernel_remote.py) first, else the per-call script ship — the fail-open route when
     a kernel cannot be spawned and the only route for hosts that cannot sustain a background process."""
@@ -671,6 +671,9 @@ def _execute_remote(code: str, task_id: Optional[str], enabled_tools: Optional[L
         if "OK" not in py_check.get("output", ""):
             return _error_result(f"Python 3 is not available in the {env_type} terminal "
                                  "environment. Install Python to use execute_code with remote backends.")
+        if fresh_process:
+            return _run_remote_per_call(env, env_type, code, effective_task_id, sandbox_tools,
+                                        timeout=timeout, max_tool_calls=max_tool_calls, exec_start=exec_start)
         # Session-kernel path: one persistent kernel per owner on the
         # run-to-completion transport. Spawn failure falls OPEN to the per-call
         # path below so a degraded remote host never blocks execution.
@@ -780,8 +783,10 @@ def execute_code(
         from tools.interrupt import clear_current_thread_interrupt
         clear_current_thread_interrupt()
     from hermes_cli.observability.shared_metrics_loop import record_execution_backend
+    execution_options = {"fresh_process": True} if _guard.get("fresh_process") else {}
     if env_type != "local":
-        return record_execution_backend("code", "remote", _execute_remote(code, task_id, enabled_tools, reset=bool(reset)))
+        return record_execution_backend("code", "remote", _execute_remote(
+            code, task_id, enabled_tools, reset=bool(reset), **execution_options))
     from tools.interrupt import is_interrupted as _is_interrupted
     # Session kernels are always on locally (one interpreter per conversation); the guards above
     # already ran for this cell, and the kernel path shares env builder, RPC server and redaction.
@@ -794,7 +799,7 @@ def execute_code(
         sandbox_tools=frozenset(_sandbox_tools_for(enabled_tools)),
         timeout=_cfg.get("timeout", DEFAULT_TIMEOUT),
         max_tool_calls=_cfg.get("max_tool_calls", DEFAULT_MAX_TOOL_CALLS),
-        reset=bool(reset), is_interrupted=_is_interrupted,
+        reset=bool(reset), is_interrupted=_is_interrupted, **execution_options,
     ))
 
 

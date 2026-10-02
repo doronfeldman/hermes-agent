@@ -9,6 +9,7 @@ Inspired by OpenAI Codex's Smart Approvals guardian subagent.
 """
 
 import logging
+import math
 import time
 from tools import approval_context as _ctx
 
@@ -71,10 +72,11 @@ def _get_smart_policy() -> str:
     return policy.strip() if isinstance(policy, str) else ""
 
 
-def _smart_approve(command: str, description: str) -> str:
+def _smart_approve(command: str, description: str, *, report_failure: bool = False) -> str:
     """Ask the auxiliary LLM; return 'approve', 'deny', or 'escalate' (uncertain/failed).
 
-    Inspired by OpenAI Codex's Smart Approvals guardian subagent (openai/codex#13860).
+    Headless callers request distinct error/timeout/invalid_response outcomes instead of
+    escalating provider failures to the interactive owner. The provider and policy are shared.
     """
     _smart_t0 = time.monotonic()
     try:
@@ -85,6 +87,8 @@ def _smart_approve(command: str, description: str) -> str:
         # Pass the same configured value explicitly (belt) and log the call + duration (suspenders) so a
         # hang is visible in the logs instead of silent. See #72500, #82846.
         smart_timeout = _get_task_timeout("approval")
+        if report_failure and (not math.isfinite(smart_timeout) or smart_timeout <= 0):
+            raise ValueError("auxiliary.approval.timeout must be positive and finite")
         logger.debug("Smart approvals: assessing risk for command (timeout=%ss)", smart_timeout)
         system_prompt = _SYSTEM_PROMPT
         # Operator policy goes in the SYSTEM prompt only — the trusted channel. Never
@@ -99,17 +103,29 @@ def _smart_approve(command: str, description: str) -> str:
             )
         user_prompt = (
             f"The following command was flagged as: {description}\n\n"
-            f"<command>\n{_strip_shell_comments(command)}\n</command>\n\n"
+            f"<command>\n{command if report_failure else _strip_shell_comments(command)}\n</command>\n\n"
             "Assess the ACTUAL risk of the shell operations in this command. "
             "Many flagged commands are false positives — for example, "
             '`python -c "print(\'hello\')"` is flagged as "script execution '
             'via -c flag" but is completely harmless.\n\n'
             "Respond with exactly one word: APPROVE, DENY, or ESCALATE"
         )
-        response = call_llm(
-            task="approval", temperature=0, max_tokens=16, timeout=smart_timeout,
-            messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}],
-        )
+        def assess():
+            return call_llm(
+                task="approval", temperature=0, max_tokens=16, timeout=smart_timeout,
+                messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}],
+            )
+
+        if report_failure:
+            # Bound the whole call, including auxiliary queueing and provider retries.
+            # A late verdict has no authority: this worker only returns data, never executes.
+            from agent.deadline import run_bounded_sync
+            bounded = run_bounded_sync(assess, smart_timeout, label="cron-smart-approval")
+            if bounded.timed_out:
+                return "timeout"
+            response = bounded.value
+        else:
+            response = assess()
         logger.debug("Smart approvals: LLM call completed in %.1fs", time.monotonic() - _smart_t0)
         answer = (response.choices[0].message.content or "").strip().upper()
         if not answer:
@@ -121,18 +137,22 @@ def _smart_approve(command: str, description: str) -> str:
             finish_reason = getattr(response.choices[0], "finish_reason", None)
             logger.warning("Smart approvals: guardian returned an empty answer "
                            "(finish_reason=%s), escalating", finish_reason)
-            return "escalate"
+            return "invalid_response" if report_failure else "escalate"
+        if report_failure and answer not in {"APPROVE", "DENY", "ESCALATE"}:
+            return "invalid_response"
         return _VERDICTS.get(answer, "escalate")
     except Exception as e:
         # WARNING, not DEBUG: a failed/blocked guardian call is a real event
         # the operator needs to see (the hang was invisible at DEBUG).
         logger.warning("Smart approvals: LLM call failed after %.1fs (%s: %s), escalating",
                        time.monotonic() - _smart_t0, type(e).__name__, e)
+        if report_failure:
+            return "timeout" if isinstance(e, TimeoutError) else "error"
         return "escalate"
 
 
 def _smart_verdict(command: str, description: str, pattern_key: str,
-                   pattern_keys: list[str], session_key: str) -> str:
+                   pattern_keys: list[str], session_key: str, *, report_failure: bool = False) -> str:
     """Run the guardian LLM with observer hooks; 'approve' | 'deny' | 'escalate'.
     Redaction is observer-payload preparation, not approval policy: if it fails,
     skip observability rather than leak raw data or block the LLM decision."""
@@ -149,7 +169,8 @@ def _smart_verdict(command: str, description: str, pattern_key: str,
         payload = None
     else:
         _ctx._fire_approval_hook("pre_approval_request", **payload)
-    verdict = _smart_approve(command, description)
+    verdict = (_smart_approve(command, description, report_failure=True) if report_failure
+               else _smart_approve(command, description))
     if payload is not None and verdict in {"approve", "deny"}:
         _ctx._fire_approval_hook("post_approval_response", **payload, choice=f"smart_{verdict}", decided_by="aux_llm")
     return verdict

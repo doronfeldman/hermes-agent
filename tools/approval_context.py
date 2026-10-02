@@ -320,8 +320,16 @@ def _binary_approval_mode(key: str) -> str:
 
 
 def _get_cron_approval_mode() -> str:
-    """Read the cron approval mode from config. Returns 'deny' or 'approve'."""
+    """Read the profile's cron mode: 'deny', 'approve', or opt-in 'smart'."""
+    if str(_get_approval_config().get("cron_mode", "")).strip().lower() == "smart":
+        return "smart"
     return _binary_approval_mode("cron_mode")
+
+
+def _is_cron_smart_context() -> bool:
+    """Keep the existing single-query precedence when both unattended markers exist."""
+    return (_is_cron_approval_context() and not _is_single_query_approval_context()
+            and _get_cron_approval_mode() == "smart")
 
 
 def _get_single_query_approval_mode() -> str:
