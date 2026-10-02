@@ -1266,7 +1266,8 @@ def _build_gateway_agent_history(
             continue
 
         content = msg.get("content")
-        if separate_observed_context and msg.get("observed") and role == "user" and content:
+        ingress_observation = isinstance(msg.get("display_metadata"), dict) and msg["display_metadata"].get("ingress_observation")
+        if (separate_observed_context or ingress_observation) and msg.get("observed") and role == "user" and content:
             if inject_timestamps and isinstance(content, str):
                 content = _render_msg_ts(content, msg.get("timestamp"), tz=_msg_tz)
             observed_group_context.append(str(content).strip())

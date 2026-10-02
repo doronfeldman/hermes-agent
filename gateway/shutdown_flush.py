@@ -216,7 +216,19 @@ def recover_pending_to_db(session_db=None, *, session_resolver=None) -> int:
     branch. A returned ``db`` routes the append to the profile store owning the key (multiplexed
     gateways); ``None`` falls back to ``session_db``. Returns the number of messages recovered.
     """
-    flush_files = sorted(_get_flush_dir().glob("*.json"))
+    def recovery_order(path):
+        # Existing spool files retain their timestamp-prefix ordering. Ingress tasks can
+        # finish/cancel out of order, so their explicit arrival order outranks UUID names.
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8-sig"))
+            if payload.get("reason") == "ingress_unsettled":
+                order = (payload.get("data") or {}).get("ingress_order")
+                if type(order) is int and order > 0:
+                    return order, path.name
+            return int(float(payload.get("ts", 0)) * 1_000_000_000), path.name
+        except (ValueError, TypeError, OSError, AttributeError):
+            return 0, path.name
+    flush_files = sorted(_get_flush_dir().glob("*.json"), key=recovery_order)
     if not flush_files:
         return 0
     own_db = session_db is None
@@ -294,6 +306,13 @@ def _recover_one_payload(session_db, path: Path, payload: Dict[str, Any], *,
                        "session_key-to-id resolution failed. "
                        "The message text is preserved in %s", session_key, path)
         return False
+    if payload.get("reason") == "ingress_unsettled":
+        if data.get("ingress_authorized") is False:
+            logger.warning("Preserving ingress recovery file with unconfirmed authorization for operator review")
+            return False
+        from gateway.ingress_store import recover_input
+        recover_input(target_db, session_id, data.get("message_id"), text, payload.get("ts"))
+        return True
     target_db.append_message(session_id=session_id, role="user", content=text,
                              timestamp=payload.get("ts", int(time.time())))
     return True

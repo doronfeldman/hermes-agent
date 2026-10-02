@@ -14,6 +14,7 @@ Hermes has several distinct pluggable interfaces — some use Python `register_*
 
 | If you want to add… | Read |
 |---|---|
+| A pre-busy group participation policy | [Gateway ingress policies](./ingress-policies.md) |
 | Custom tools, hooks, slash commands, skills, or CLI subcommands | **This guide** (the general plugin surface) |
 | A **native desktop app** extension (panes, pages, status bar, palette, themes) | [Desktop Plugin SDK](../desktop-plugin-sdk.md) |
 | A **web dashboard** extension (tabs, shell slots, themes) | [Extending the Dashboard](../../user-guide/features/extending-the-dashboard.md) |

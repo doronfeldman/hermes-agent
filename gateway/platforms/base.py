@@ -4067,6 +4067,13 @@ class BasePlatformAdapter(ABC):
             logger.warning("Dropping internally routed event: expected session=%s derived=%s",
                            expected_session_key, session_key)
             return
+        ingress = getattr(self, "_ingress_queue", None)
+        if ingress is not None and await ingress.submit(event, session_key):
+            return
+        await self._dispatch_admitted_message(event, session_key)
+
+    async def _dispatch_admitted_message(self, event: MessageEvent, session_key: str) -> None:
+        """Normal busy/turn admission, after an optional ingress policy settles."""
         # On-entry self-heal: clear a guard whose owner task already exited.
         if session_key in self._active_sessions:
             self._heal_stale_session_lock(session_key)
@@ -4771,6 +4778,9 @@ class BasePlatformAdapter(ABC):
                                "releasing tracking and letting them unwind in the background",
                                self.name, sum(not t.done() for t in tasks))
                 break
+        ingress = getattr(self, "_ingress_queue", None)
+        if ingress is not None:
+            await ingress.preserve_pending()
         with contextlib.suppress(Exception):  # flush pending messages to disk before clearing
             from gateway.shutdown_flush import flush_pending_to_file
             flush_pending_to_file(self._pending_messages, reason="adapter_shutdown")

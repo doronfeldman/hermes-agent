@@ -1286,6 +1286,11 @@ class GatewayAdapterLifecycleMixin:
         """Install the runner callbacks every adapter needs (defaults = primary handlers;
         secondary wiring passes profile-scoped variants). ``set_reaction_handler`` is optional."""
         adapter.set_message_handler(message_handler or self._primary_message_handler())
+        from gateway.ingress import IngressQueue, evaluate, has_policy, pending_control, authorized
+        adapter._ingress_queue = IngressQueue(
+            adapter, lambda event, key, previous, deadline: evaluate(self, event, key, previous, deadline),
+            enabled=has_policy, bypass=lambda event, key: pending_control(self, key),
+            authorize=lambda event: authorized(self, event))
         adapter.set_fatal_error_handler(fatal_error_handler or self._handle_adapter_fatal_error)
         adapter.set_session_store(self.session_store)
         adapter.set_busy_session_handler(busy_session_handler or self._primary_busy_session_handler())

@@ -6260,6 +6260,9 @@ class TelegramAdapter(BasePlatformAdapter):
         allowed = self._telegram_observe_allowed_chats()
         if not allowed or self._chat_id_str(raw_message) not in allowed:
             return event
+        from gateway.platforms.base import coerce_plaintext_gateway_command
+        if event.allow_gateway_control:
+            coerce_plaintext_gateway_command(event)
         observe_prompt = self._telegram_group_observe_channel_prompt()
         channel_prompt = f"{event.channel_prompt}\n\n{observe_prompt}" if event.channel_prompt else observe_prompt
         if event.message_type == MessageType.COMMAND:
@@ -7162,6 +7165,11 @@ class TelegramAdapter(BasePlatformAdapter):
         return MessageEvent(
             text=expand_link_entities(message), message_type=msg_type, source=source, raw_message=message,
             message_id=str(message.message_id), platform_update_id=update_id,
+            user_id=source.user_id, user_name=source.user_name,
+            reply_expected=(chat_type == "dm" or msg_type == MessageType.COMMAND
+                            or self._is_reply_to_bot(message) or self._message_mentions_bot(message)
+                            or self._message_matches_mention_patterns(message)),
+            reply_to_is_own_message=self._is_reply_to_bot(message),
             reply_to_message_id=reply_to_id, reply_to_text=reply_to_text, auto_skill=topic_skill,
             channel_prompt=group_identity_prompt(self, message, channel_prompt),
             timestamp=message.date)
