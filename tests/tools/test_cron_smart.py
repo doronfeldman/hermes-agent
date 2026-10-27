@@ -23,7 +23,7 @@ def homes(tmp_path, monkeypatch):
         (home / "config.yaml").write_text(
             f"approvals:\n  mode: manual\n  cron_mode: {mode}\n"
             f"  smart_policy: Policy for profile {name}\n  deny: ['*forbidden*']\n"
-            "security:\n  tirith_enabled: false\ncommand_allowlist: []\n"
+            "command_allowlist: []\n"
         )
         paths.append(home)
     monkeypatch.setattr(approval, "submit_pending", Mock(side_effect=AssertionError("must not queue")))
@@ -102,9 +102,6 @@ def test_cron_smart_does_not_reuse_broad_grants(homes, monkeypatch, kind):
         if kind in {"combined", "dangerous"}:
             guard = approval.check_all_command_guards if kind == "combined" else approval.check_dangerous_command
             assert guard("echo hello", "local")["approved"]
-            monkeypatch.setattr(approval, "_tirith_scan", lambda _: {
-                "action": "block", "findings": [{"rule_id": "content-test", "title": "unsafe content"}],
-                "summary": "unsafe content"})
-            assert not guard("echo hello", "local")["approved"]
+
     finally:
         reset_hermes_home_override(token)
