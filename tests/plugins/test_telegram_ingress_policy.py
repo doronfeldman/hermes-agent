@@ -10,7 +10,7 @@ from tests.plugins.test_telegram_update_admission import connected, update
 async def test_native_group_normalization_keeps_author_and_targeting(monkeypatch):
     async with connected(monkeypatch, extra={'require_mention': False,
         'observe_unmentioned_group_messages': True, 'allowed_chats': ['42'],
-        'group_allowed_chats': ['42']}) as (adapter, app, delivered):
+        'group_allowed_chats': ['42']}) as (adapter, app, _delivered):
         incoming = update(app.bot, group=True)
         event = adapter._build_message_event(incoming.message, MessageType.TEXT)
         shared = adapter._apply_telegram_group_observe_attribution(event)

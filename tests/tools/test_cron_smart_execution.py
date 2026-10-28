@@ -6,8 +6,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from tests.tools._child_env_fixtures import child_env, RunToCompletionEnv  # noqa: F401
-from tests.tools.test_cron_smart import homes  # noqa: F401
+from tests.tools._child_env_fixtures import child_env, RunToCompletionEnv
+from tests.tools.test_cron_smart import homes
 from hermes_constants import set_hermes_home_override, reset_hermes_home_override
 
 
