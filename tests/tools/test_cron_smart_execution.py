@@ -6,9 +6,13 @@ from types import SimpleNamespace
 
 import pytest
 
-from tests.tools._child_env_fixtures import child_env, RunToCompletionEnv
-from tests.tools.test_cron_smart import homes
+from tests.tools import _child_env_fixtures, test_cron_smart
+from tests.tools._child_env_fixtures import RunToCompletionEnv
 from hermes_constants import set_hermes_home_override, reset_hermes_home_override
+
+
+child_env = _child_env_fixtures.child_env
+homes = test_cron_smart.homes
 
 
 @pytest.mark.parametrize("transport", ["local", "ssh", "terminal"])
@@ -57,9 +61,9 @@ def test_cron_smart_real_execution_is_one_shot(child_env, homes, monkeypatch, tr
         assert source in assessed[0]
         if transport == "local":
             from pathlib import Path
-            result = execute("print('x' * 1_100_000)")
+            result = execute("print('x' * 1_100_000 + 'end-of-cell')")
             assert result["status"] == "success", result
-            assert Path(result["stdout_spill_path"]).is_file()
+            assert Path(result["stdout_spill_path"]).read_text().rstrip().endswith("end-of-cell")
             assert "state persists" not in result.get("warning", "")
             assert result["kernel"]["mode"] == "one-shot"
     finally:

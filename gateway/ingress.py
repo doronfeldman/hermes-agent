@@ -35,6 +35,7 @@ def pending_control(runner, key):
                     or clarify_gateway.get_pending_for_session(key, include_choice_prompts=True)
                     or slash_confirm.get_pending(key) or has_blocking_approval(key))
     except Exception:
+        logger.debug("Could not determine pending ingress controls", exc_info=True)
         return True
 
 
@@ -44,21 +45,19 @@ from gateway.ingress_queue import IngressQueue
 def has_policy(event):
     """Read the already-loaded registry under canonical runtime ownership; never discover here."""
     from gateway.session_identity import identity_of
-    from hermes_constants import set_hermes_home_override, reset_hermes_home_override
+    from agent.runtime_scope import bind_state, scope_for_profile
     from hermes_cli.plugins import iter_hook_callbacks
     identity = identity_of(event.source)
     if identity is None:
         return False
-    token = set_hermes_home_override(identity.runtime_home)
-    try:
+    # Registration alone needs the profile identity. No plugin runs or reads secrets here.
+    with bind_state(scope_for_profile(identity.runtime_home), secrets={}, defer_terminal=True):
         return bool(iter_hook_callbacks('pre_gateway_ingress'))
-    finally:
-        reset_hermes_home_override(token)
 
 
 async def authorized(runner, event):
     """Full canonical authorization before accepting recoverable ingress ownership."""
-    author = event.user_id or event.source.user_id
+    author = event.sender_id()
     if not author:
         return False
     source = replace_source(event.source, user_id=author,
@@ -81,7 +80,7 @@ async def _decision(runner, event, key, previous):
             return False
         if previous is None and runner._is_session_running(key):
             return False  # startup/eviction: active input may not have reached the transcript
-        author = event.user_id or event.source.user_id
+        author = event.sender_id()
         if not author:
             return False
         source = replace_source(event.source, user_id=author, user_name=event.user_name or event.source.user_name)
@@ -92,6 +91,7 @@ async def _decision(runner, event, key, previous):
                 read_snapshot, runner.session_store, key, required_message_id=previous,
                 message_id=event.message_id), timeout=0.5)
         except Exception:
+            logger.debug("Ingress history snapshot unavailable", exc_info=True)
             return False
         if snapshot is None:
             return False
@@ -105,7 +105,7 @@ async def _decision(runner, event, key, previous):
                                  event.message_id, text, snapshot.history, event.reply_expected)
         try:
             result = await asyncio.wait_for(callbacks[0](request), timeout=2.0)
-        except Exception:
+        except Exception:  # health: allow BLE001 -- a plugin failure must dispatch normally; its exception may contain private chat text
             logger.debug('Ingress policy unavailable; continuing normal dispatch')
             return False
         if not isinstance(result, dict) or result.get('action') != 'observe':

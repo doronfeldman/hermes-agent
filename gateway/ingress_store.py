@@ -4,9 +4,12 @@ Run off the event loop. No ordinary transcript retry queue is involved: returnin
 False means the caller may dispatch; an uncertain write raises and requires recovery.
 """
 from dataclasses import dataclass
+import logging
 import time
 from agent.message_metadata import stamp_message_uid
 from hermes_state_messages import _INSERT_MESSAGE_SQL
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -128,13 +131,14 @@ def observe(store, snapshot, message_id, text, *, commit_guard=None):
             try:
                 if commit_guard() is not True:
                     return False
-            except Exception:
+            except Exception:  # health: allow BLE001 -- a third-party commit guard may raise anything; an unconfirmed decision must not commit
                 return False
         _insert(db, conn, sid, message_id, text, observed=True)
         return True
     try:
         return db._execute_write(write, patience_s=0.25)
     except Exception:
+        logger.debug("Confirming ingress observation after a write error", exc_info=True)
         try:
             # A failed rollback may leave a live writer transaction. A separate reader
             # seeing no row cannot prove that this transaction will never commit later.
@@ -143,8 +147,8 @@ def observe(store, snapshot, message_id, text, *, commit_guard=None):
                     raise UnsettledObservation("ingress writer has not settled")
             with db._read_ctx() as conn:
                 return _existing(conn, sid, message_id) is True
-        except Exception:
-            raise UnsettledObservation('ingress observation settlement unavailable') from None
+        except Exception as exc:
+            raise UnsettledObservation('ingress observation settlement unavailable') from exc
 
 
 def recover_input(db, sid, message_id, text, timestamp):

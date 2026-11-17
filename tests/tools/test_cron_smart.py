@@ -26,9 +26,10 @@ def homes(tmp_path, monkeypatch):
             "command_allowlist: []\n"
         )
         paths.append(home)
-    monkeypatch.setattr(approval, "submit_pending", Mock(side_effect=AssertionError("must not queue")))
+    monkeypatch.setattr(approval, "_await_gateway_decision", Mock(side_effect=AssertionError("must not queue")))
     monkeypatch.setattr(approval, "_human_decision", Mock(side_effect=AssertionError("must not prompt")))
     yield paths
+    assert approval.get_pending_gateway_approval("cron-smart-test") is None
     approval.clear_session("cron-smart-test")
     reset_session_vars()
 
@@ -103,5 +104,24 @@ def test_cron_smart_does_not_reuse_broad_grants(homes, monkeypatch, kind):
             guard = approval.check_all_command_guards if kind == "combined" else approval.check_dangerous_command
             assert guard("echo hello", "local")["approved"]
 
+    finally:
+        reset_hermes_home_override(token)
+
+
+@pytest.mark.parametrize("guard", [approval.check_all_command_guards, approval.check_dangerous_command])
+@pytest.mark.parametrize("finding", ["manual_only", "scan_incomplete", "unread"])
+def test_cron_smart_respects_human_only_findings(homes, monkeypatch, guard, finding):
+    guardian = Mock(side_effect=AssertionError("human-only findings cannot reach a model"))
+    monkeypatch.setattr(approval, "_smart_verdict", guardian)
+    human_key = (next(iter(approval.SMART_MANUAL_ONLY_DESCRIPTIONS)) if finding == "manual_only"
+                 else approval._SCAN_INCOMPLETE_DESCRIPTION)
+    monkeypatch.setattr(approval, "_command_findings", lambda _: [("script", "script"), (human_key, human_key)])
+    monkeypatch.setattr(approval, "hardline_scan_incomplete", lambda _: finding == "unread")
+    token = set_hermes_home_override(homes[0])
+    try:
+        result = guard("echo hello", "local")
+        assert not result["approved"]
+        assert not result.get("approval_pending")
+        guardian.assert_not_called()
     finally:
         reset_hermes_home_override(token)

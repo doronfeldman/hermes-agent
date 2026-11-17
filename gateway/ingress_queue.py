@@ -120,10 +120,10 @@ class IngressQueue:
                 except asyncio.CancelledError:
                     if asyncio.current_task().cancelling():
                         raise
-                except Exception:
+                except Exception as exc:
                     # The predecessor retains its own recovery receipt; successors remain
                     # recoverable too, rather than being silently lost or sent out of order.
-                    raise UnsettledObservation('predecessor admission unresolved') from None
+                    raise UnsettledObservation('predecessor admission unresolved') from exc
             previous = self.previous.get(key)
             handled = False
             if enabled and previous != '' and asyncio.get_running_loop().time() < deadline:
@@ -131,7 +131,7 @@ class IngressQueue:
                     handled = await self.policy(event, key, previous, deadline)
                 except (asyncio.CancelledError, UnsettledObservation):
                     raise
-                except Exception:
+                except Exception:  # health: allow BLE001 -- plugin exceptions may contain chat text; expose only the dispatch outcome
                     logger.warning('Ingress policy failed; continuing normal dispatch')
             if handled:
                 item.settled = True

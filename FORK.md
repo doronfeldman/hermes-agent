@@ -4,11 +4,9 @@ This fork's runnable branch is `custom/jev-runtime`. Core changes are committed 
 to the source; installing this branch does not require applying external patch files.
 `main` remains available as an upstream tracking branch.
 
-The current upstream base is stable **v0.22.5**, commit
-`bf0203a794a07aac3ff764972ab9087baa4e4f4e`, merged on the isolated review branch
-`review/security-update-20261027`. The previous deployed fork revision was
-`485c9b9f1669b7327714d3fc51277367c7ae9933`, based on Hermes 0.21.5
-(`34f8ec3b407e50bad3ae27e4cd79d65212061356`); retain it for operational rollback.
+The current upstream base is stable **v0.23.2**, commit
+`ae2a81ccc00e9b7c06301523e5bb09608397149c`. The previous deployed fork revision
+was `399c4a1bc422391f70c1937accc6dc479cea1cd0`, based on v0.22.5.
 
 ## Carried changes
 
@@ -28,6 +26,15 @@ code alone does not enable cron Smart approval: the default remains `deny`. Enab
 only in the intended profile, preserving that profile's existing provider/model and policy.
 Command approval is not permission to unsubscribe a user or modify their email; the
 workflow must still obtain explicit consent for the exact unsubscribe/archive action.
+
+## v0.23.2 integration
+
+- The ingress hook is registered through the release's plugin context. Telegram retains
+  shared-session command attribution and uses the message's resolved sender for admission.
+- Unattended Smart review respects upstream human-only decisions. Approved Python cells
+  run in a fresh process and retain the release's scoped tool routing and output handling.
+- The fork retains its Python 3.14.10, uv 0.13.6 and certifi 2026.10.23 pins and adopts
+  the release's OpenAI SDK 2.54.0.
 
 ## Stable integration notes (2026-10-27)
 

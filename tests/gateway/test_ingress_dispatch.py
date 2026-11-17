@@ -24,6 +24,20 @@ def event(text='chatter', room='room', mid='m1'):
 
 
 @pytest.mark.asyncio
+async def test_mixed_sender_batch_has_no_single_author_for_ingress_policy():
+    from dataclasses import replace
+    from gateway.ingress import authorized
+
+    first = event()
+    second = event(mid='m2')
+    second.source = replace(second.source, user_id='other')
+    first.absorb_turn_input(second)
+
+    assert first.source.user_id == 'u'
+    assert not await authorized(None, first)
+
+
+@pytest.mark.asyncio
 async def test_classifier_does_not_block_control_or_other_sessions_and_observe_never_queues():
     adapter = Adapter()
     reached, release = asyncio.Event(), asyncio.Event()
